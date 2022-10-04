@@ -36,12 +36,18 @@
 
 #include <explore/costmap_client.h>
 
+#include "costmap_2d/cost_values.h"
+
 #include <functional>
 #include <mutex>
 #include <string>
 
 namespace explore
 {
+using costmap_2d::LETHAL_OBSTACLE;
+using costmap_2d::NO_INFORMATION;
+using costmap_2d::FREE_SPACE;
+
 // static translation table to speed things up
 std::array<unsigned char, 256> init_translation_table();
 static const std::array<unsigned char, 256> cost_translation_table__ =
@@ -50,7 +56,7 @@ static const std::array<unsigned char, 256> cost_translation_table__ =
 Costmap2DClient::Costmap2DClient(ros::NodeHandle& param_nh,
                                  ros::NodeHandle& subscription_nh,
                                  const tf::TransformListener* tf)
-  : tf_(tf)
+  : tf_(tf), is_updated_(false)
 {
   std::string costmap_topic;
   std::string footprint_topic;
@@ -76,12 +82,12 @@ Costmap2DClient::Costmap2DClient(ros::NodeHandle& param_nh,
   updateFullMap(costmap_msg);
 
   /* subscribe to map updates */
-  costmap_updates_sub_ =
-      subscription_nh.subscribe<map_msgs::OccupancyGridUpdate>(
-          costmap_updates_topic, 1000,
-          [this](const map_msgs::OccupancyGridUpdate::ConstPtr& msg) {
-            updatePartialMap(msg);
-          });
+  // costmap_updates_sub_ =
+  //     subscription_nh.subscribe<map_msgs::OccupancyGridUpdate>(
+  //         costmap_updates_topic, 1000,
+  //         [this](const map_msgs::OccupancyGridUpdate::ConstPtr& msg) {
+  //           updatePartialMap(msg);
+  //         });
 
   /* resolve tf prefix for robot_base_frame */
   std::string tf_prefix = tf::getPrefixParam(param_nh);
@@ -112,6 +118,19 @@ Costmap2DClient::Costmap2DClient(ros::NodeHandle& param_nh,
   }
 }
 
+void Costmap2DClient::waitForUpdate(double freq) {
+  ros::Rate rate(freq);
+  while (ros::ok()) {
+    pthread_mutex_lock(&is_updated_mutex_);
+    if (is_updated_) {
+      pthread_mutex_unlock(&is_updated_mutex_);
+      return;
+    }
+    pthread_mutex_unlock(&is_updated_mutex_);
+    rate.sleep();
+  }
+}
+
 void Costmap2DClient::updateFullMap(const nav_msgs::OccupancyGrid::ConstPtr& msg)
 {
   global_frame_ = msg->header.frame_id;
@@ -136,10 +155,23 @@ void Costmap2DClient::updateFullMap(const nav_msgs::OccupancyGrid::ConstPtr& msg
   size_t costmap_size = costmap_.getSizeInCellsX() * costmap_.getSizeInCellsY();
   ROS_DEBUG("full map update, %lu values", costmap_size);
   for (size_t i = 0; i < costmap_size && i < msg->data.size(); ++i) {
-    unsigned char cell_cost = static_cast<unsigned char>(msg->data[i]);
-    costmap_data[i] = cost_translation_table__[cell_cost];
+    int8_t prob = msg->data[i];
+    unsigned char cell_cost;
+    if (prob < 0) {
+      cell_cost = NO_INFORMATION;
+    } else if (prob == 0) {
+      cell_cost = FREE_SPACE;
+    } else if (prob > 75) {
+        cell_cost = LETHAL_OBSTACLE;
+    } else {
+      continue;
+    }
+    costmap_data[i] = cell_cost;
   }
   ROS_DEBUG("map updated, written %lu values", costmap_size);
+  pthread_mutex_lock(&is_updated_mutex_);
+  is_updated_ = true;
+  pthread_mutex_unlock(&is_updated_mutex_);
 }
 
 void Costmap2DClient::updatePartialMap(
@@ -180,11 +212,28 @@ void Costmap2DClient::updatePartialMap(
   for (size_t y = y0; y < yn && y < costmap_yn; ++y) {
     for (size_t x = x0; x < xn && x < costmap_xn; ++x) {
       size_t idx = costmap_.getIndex(x, y);
-      unsigned char cell_cost = static_cast<unsigned char>(msg->data[i]);
-      costmap_data[idx] = cost_translation_table__[cell_cost];
+      int8_t prob = msg->data[i];
+      // if (prob != 0) {
+      //   ROS_DEBUG("pose %lu, %lu has prob %d", x, y, prob);
+      // }
+      unsigned char cell_cost;
+      if (prob < 0) {
+        cell_cost = NO_INFORMATION;
+      } else if (prob == 0) {
+        cell_cost = FREE_SPACE;
+      } else if (prob > 75) {
+        cell_cost = LETHAL_OBSTACLE;
+      } else {
+        ++i;
+        continue;
+      }
+      costmap_data[idx] = cell_cost;
       ++i;
     }
   }
+  pthread_mutex_lock(&is_updated_mutex_);
+  is_updated_ = true;
+  pthread_mutex_unlock(&is_updated_mutex_);
 }
 
 geometry_msgs::Pose Costmap2DClient::getRobotPose() const

@@ -44,6 +44,7 @@
 #include <ros/ros.h>
 #include <tf/tf.h>
 #include <tf/transform_listener.h>
+#include <pthread.h>
 
 namespace explore
 {
@@ -67,6 +68,13 @@ public:
    * @return pose of the robot in the global frame of the costmap
    */
   geometry_msgs::Pose getRobotPose() const;
+
+  /**
+   * @brief Halts thread until the first map update
+   * 
+   * @param freq frequency of update check in Hz
+   */
+  void waitForUpdate(double freq);
 
   /**
    * @brief Return a pointer to the "master" costmap which receives updates from
@@ -124,6 +132,9 @@ private:
   // will be unsubscribed at destruction
   ros::Subscriber costmap_sub_;
   ros::Subscriber costmap_updates_sub_;
+
+  bool is_updated_;
+  pthread_mutex_t is_updated_mutex_;
 };
 
 }  // namespace explore
